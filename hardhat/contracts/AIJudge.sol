@@ -26,7 +26,9 @@ contract AIJudge is PrecompileConsumer {
 
     struct Submission {
         address submitter;
+        bytes32 commitment;
         string answer;
+        bool revealed;
     }
 
     struct Bounty {
@@ -49,6 +51,9 @@ contract AIJudge is PrecompileConsumer {
     }
 
     mapping(uint256 => Bounty) public bounties;
+     // bountyId => participant => submission index + 1
+     mapping(uint256 => mapping(address => uint256))
+     public submissionIndexPlusOne;
 
     event BountyCreated(
         uint256 indexed bountyId,
@@ -62,6 +67,13 @@ contract AIJudge is PrecompileConsumer {
         uint256 indexed bountyId,
         uint256 indexed submissionIndex,
         address indexed submitter
+    );
+
+event CommitmentSubmitted(
+    uint256 indexed bountyId,
+    uint256 indexed submissionIndex,
+    address indexed submitter,
+    bytes32 commitment
     );
 
     event AllAnswersJudged(uint256 indexed bountyId, bytes aiReview);
@@ -104,32 +116,95 @@ contract AIJudge is PrecompileConsumer {
         emit BountyCreated(bountyId, msg.sender, title, msg.value, deadline);
     }
 
-    function submitAnswer(
+    function submitCommitment(
         uint256 bountyId,
-        string calldata answer
+        bytes32 commitment
     ) external bountyExists(bountyId) {
         Bounty storage bounty = bounties[bountyId];
 
-        // require(block.timestamp < bounty.deadline, "submissions closed");
+        require(block.timestamp < bounty.deadline, "submissions closed");
         require(!bounty.judged, "already judged");
         require(!bounty.finalized, "already finalized");
+        require(commitment != bytes32(0), "empty commitment");
         require(
-            bounty.submissions.length < MAX_SUBMISSIONS,
-            "too many submissions"
-        );
-        require(bytes(answer).length <= MAX_ANSWER_LENGTH, "answer too long");
+        submissionIndexPlusOne[bountyId][msg.sender] == 0,
+        "already submitted"
+    );
+    require(
+        bounty.submissions.length < MAX_SUBMISSIONS,
+        "too many submissions"
+    );
 
-        bounty.submissions.push(
-            Submission({submitter: msg.sender, answer: answer})
-        );
+    bounty.submissions.push(
+        Submission({
+            submitter: msg.sender,
+            commitment: commitment,
+            answer: "",
+            revealed: false
+        })
+    );
 
-        emit AnswerSubmitted(
-            bountyId,
-            bounty.submissions.length - 1,
-            msg.sender
-        );
-    }
+    uint256 submissionIndex = bounty.submissions.length - 1;
 
+    submissionIndexPlusOne[bountyId][msg.sender] =
+        submissionIndex + 1;
+
+    emit CommitmentSubmitted(
+        bountyId,
+        submissionIndex,
+        msg.sender,
+        commitment
+    );
+}
+
+function revealAnswer(
+    uint256 bountyId,
+    string calldata answer,
+    bytes32 salt
+) external bountyExists(bountyId) {
+    Bounty storage bounty = bounties[bountyId];
+
+    require(
+        block.timestamp >= bounty.deadline,
+        "reveal not started"
+    );
+    require(!bounty.judged, "already judged");
+    require(!bounty.finalized, "already finalized");
+    require(
+        bytes(answer).length <= MAX_ANSWER_LENGTH,
+        "answer too long"
+    );
+
+    uint256 indexPlusOne =
+        submissionIndexPlusOne[bountyId][msg.sender];
+
+    require(indexPlusOne != 0, "no commitment");
+
+    uint256 submissionIndex = indexPlusOne - 1;
+
+    Submission storage submission =
+        bounty.submissions[submissionIndex];
+
+    require(!submission.revealed, "already revealed");
+
+    bytes32 calculatedCommitment = keccak256(
+        abi.encode(answer, salt, msg.sender, bountyId)
+    );
+
+    require(
+        calculatedCommitment == submission.commitment,
+        "invalid answer or salt"
+    );
+
+    submission.answer = answer;
+    submission.revealed = true;
+
+    emit AnswerSubmitted(
+        bountyId,
+        submissionIndex,
+        msg.sender
+    );
+}
     function judgeAll(
         uint256 bountyId,
         bytes calldata llmInput
